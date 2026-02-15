@@ -264,13 +264,19 @@ app.delete('/api/blocked-dates/:id', (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`
+// Export for Vercel
+module.exports = app;
+
+// Only listen if not in Vercel environment
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`
   ╔════════════════════════════════════════╗
   ║   Rent in Rjukan - Booking System    ║
   ╠════════════════════════════════════════╣
   ║  Server: http://localhost:${PORT}       ║
   ║  Admin:  http://localhost:${PORT}/admin.html ║
   ╚════════════════════════════════════════╝
-  `);
-});
+    `);
+  });
+}

@@ -135,7 +135,7 @@ app.post('/api/bookings', async (req, res) => {
     });
 
     // Send notification to admin
-    const adminEmail = db.settings.get('admin_email');
+    const adminEmail = process.env.ADMIN_EMAIL || db.settings.get('admin_email');
     if (adminEmail) {
       await sendEmail(
         adminEmail,

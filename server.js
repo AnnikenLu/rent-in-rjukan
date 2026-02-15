@@ -1,0 +1,276 @@
+require('dotenv').config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const nodemailer = require('nodemailer');
+const path = require('path');
+const db = require('./database');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(bodyParser.json());
+app.use(express.static('public'));
+
+// Email transporter configuration
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER || 'your-email@gmail.com',
+    pass: process.env.EMAIL_PASS || 'your-app-password'
+  }
+});
+
+// Helper function to send email
+async function sendEmail(to, subject, html) {
+  // Skip sending email if credentials are not configured
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.log('Email not configured. Would have sent:');
+    console.log(`To: ${to}`);
+    console.log(`Subject: ${subject}`);
+    return;
+  }
+
+  try {
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to,
+      subject,
+      html
+    });
+    console.log('Email sent successfully to', to);
+  } catch (error) {
+    console.error('Error sending email:', error);
+  }
+}
+
+// Check if dates overlap with existing bookings or blocked dates
+function checkDateAvailability(checkIn, checkOut, excludeBookingId = null) {
+  const checkInDate = new Date(checkIn);
+  const checkOutDate = new Date(checkOut);
+
+  // Check approved bookings
+  const approvedBookings = db.bookings.getApproved();
+  for (const booking of approvedBookings) {
+    if (excludeBookingId && booking.id === excludeBookingId) continue;
+
+    const bookedCheckIn = new Date(booking.check_in);
+    const bookedCheckOut = new Date(booking.check_out);
+
+    if (checkInDate < bookedCheckOut && checkOutDate > bookedCheckIn) {
+      return false;
+    }
+  }
+
+  // Check blocked dates
+  const blockedDates = db.blockedDates.getAll();
+  for (const blocked of blockedDates) {
+    const blockedStart = new Date(blocked.start_date);
+    const blockedEnd = new Date(blocked.end_date);
+
+    if (checkInDate < blockedEnd && checkOutDate > blockedStart) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// API Routes
+
+// Get all bookings (admin)
+app.get('/api/bookings', (req, res) => {
+  try {
+    const bookings = db.bookings.getAll();
+    res.json(bookings);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get approved bookings and blocked dates (for calendar)
+app.get('/api/unavailable-dates', (req, res) => {
+  try {
+    const approvedBookings = db.bookings.getApproved();
+    const blockedDates = db.blockedDates.getAll();
+
+    const unavailableDates = [
+      ...approvedBookings.map(b => ({
+        start: b.check_in,
+        end: b.check_out,
+        type: 'booking'
+      })),
+      ...blockedDates.map(b => ({
+        start: b.start_date,
+        end: b.end_date,
+        type: 'blocked'
+      }))
+    ];
+
+    res.json(unavailableDates);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create new booking request
+app.post('/api/bookings', async (req, res) => {
+  try {
+    const { guest_name, guest_email, guest_phone, check_in, check_out, guests, message } = req.body;
+
+    // Validate dates
+    if (!checkDateAvailability(check_in, check_out)) {
+      return res.status(400).json({ error: 'Selected dates are not available' });
+    }
+
+    // Create booking
+    const newBooking = db.bookings.create({
+      guest_name,
+      guest_email,
+      guest_phone,
+      check_in,
+      check_out,
+      guests,
+      message
+    });
+
+    // Send notification to admin
+    const adminEmail = db.settings.get('admin_email');
+    if (adminEmail) {
+      await sendEmail(
+        adminEmail,
+        'New Booking Request - Rent in Rjukan',
+        `
+          <h2>New Booking Request</h2>
+          <p><strong>Guest:</strong> ${guest_name}</p>
+          <p><strong>Email:</strong> ${guest_email}</p>
+          <p><strong>Phone:</strong> ${guest_phone || 'Not provided'}</p>
+          <p><strong>Check-in:</strong> ${check_in}</p>
+          <p><strong>Check-out:</strong> ${check_out}</p>
+          <p><strong>Guests:</strong> ${guests}</p>
+          <p><strong>Message:</strong> ${message || 'No message'}</p>
+          <br>
+          <p>Please log in to the admin panel to approve or deny this request.</p>
+        `
+      );
+    }
+
+    // Send confirmation to guest
+    await sendEmail(
+      guest_email,
+      'Booking Request Received - Rent in Rjukan',
+      `
+        <h2>Thank you for your booking request!</h2>
+        <p>Dear ${guest_name},</p>
+        <p>We have received your booking request for:</p>
+        <p><strong>Check-in:</strong> ${check_in}</p>
+        <p><strong>Check-out:</strong> ${check_out}</p>
+        <p><strong>Guests:</strong> ${guests}</p>
+        <br>
+        <p>Your request is pending approval. We will notify you once it has been reviewed.</p>
+        <p>Thank you for choosing Rent in Rjukan!</p>
+      `
+    );
+
+    res.json({ id: newBooking.id, message: 'Booking request submitted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update booking status (approve/deny)
+app.patch('/api/bookings/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { status } = req.body;
+
+    const booking = db.bookings.getById(id);
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    // If approving, check availability again
+    if (status === 'approved') {
+      if (!checkDateAvailability(booking.check_in, booking.check_out, id)) {
+        return res.status(400).json({ error: 'Dates are no longer available' });
+      }
+    }
+
+    db.bookings.updateStatus(id, status);
+
+    // Send email to guest
+    const statusMessage = status === 'approved'
+      ? 'Your booking has been approved!'
+      : 'Unfortunately, your booking request has been denied.';
+
+    await sendEmail(
+      booking.guest_email,
+      `Booking ${status === 'approved' ? 'Approved' : 'Denied'} - Rent in Rjukan`,
+      `
+        <h2>${statusMessage}</h2>
+        <p>Dear ${booking.guest_name},</p>
+        <p><strong>Check-in:</strong> ${booking.check_in}</p>
+        <p><strong>Check-out:</strong> ${booking.check_out}</p>
+        ${status === 'approved' ? '<p>We look forward to welcoming you to Rjukan!</p>' : '<p>Please feel free to submit another request for different dates.</p>'}
+      `
+    );
+
+    res.json({ message: 'Booking status updated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete booking
+app.delete('/api/bookings/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    db.bookings.delete(id);
+    res.json({ message: 'Booking deleted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get blocked dates
+app.get('/api/blocked-dates', (req, res) => {
+  try {
+    const blockedDates = db.blockedDates.getAll();
+    res.json(blockedDates);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create blocked date
+app.post('/api/blocked-dates', (req, res) => {
+  try {
+    const { start_date, end_date, reason } = req.body;
+    const newBlockedDate = db.blockedDates.create({ start_date, end_date, reason });
+    res.json({ id: newBlockedDate.id, message: 'Dates blocked successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete blocked date
+app.delete('/api/blocked-dates/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    db.blockedDates.delete(id);
+    res.json({ message: 'Blocked date removed' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`
+  ╔════════════════════════════════════════╗
+  ║   Rent in Rjukan - Booking System    ║
+  ╠════════════════════════════════════════╣
+  ║  Server: http://localhost:${PORT}       ║
+  ║  Admin:  http://localhost:${PORT}/admin.html ║
+  ╚════════════════════════════════════════╝
+  `);
+});

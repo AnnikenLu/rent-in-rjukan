@@ -79,9 +79,9 @@ async function checkDateAvailability(checkIn, checkOut, excludeBookingId = null)
 // API Routes
 
 // Get all bookings (admin)
-app.get('/api/bookings', async (req, res) => {
+app.get('/api/bookings', (req, res) => {
   try {
-    const bookings = await db.bookings.getAll();
+    const bookings = db.bookings.getAll();
     res.json(bookings);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -89,10 +89,10 @@ app.get('/api/bookings', async (req, res) => {
 });
 
 // Get approved bookings and blocked dates (for calendar)
-app.get('/api/unavailable-dates', async (req, res) => {
+app.get('/api/unavailable-dates', (req, res) => {
   try {
-    const approvedBookings = await db.bookings.getApproved();
-    const blockedDates = await db.blockedDates.getAll();
+    const approvedBookings = db.bookings.getApproved();
+    const blockedDates = db.blockedDates.getAll();
 
     const unavailableDates = [
       ...approvedBookings.map(b => ({
@@ -119,12 +119,12 @@ app.post('/api/bookings', async (req, res) => {
     const { guest_name, guest_email, guest_phone, check_in, check_out, guests, message } = req.body;
 
     // Validate dates
-    if (!(await checkDateAvailability(check_in, check_out))) {
+    if (!checkDateAvailability(check_in, check_out)) {
       return res.status(400).json({ error: 'Selected dates are not available' });
     }
 
     // Create booking
-    const newBooking = await db.bookings.create({
+    const newBooking = db.bookings.create({
       guest_name,
       guest_email,
       guest_phone,
@@ -135,7 +135,7 @@ app.post('/api/bookings', async (req, res) => {
     });
 
     // Send notification to admin
-    const adminEmail = process.env.ADMIN_EMAIL || await db.settings.get('admin_email');
+    const adminEmail = process.env.ADMIN_EMAIL || db.settings.get('admin_email');
     console.log('Admin email:', adminEmail);
     console.log('ADMIN_EMAIL env:', process.env.ADMIN_EMAIL);
     if (adminEmail) {
@@ -186,19 +186,19 @@ app.patch('/api/bookings/:id', async (req, res) => {
     const id = parseInt(req.params.id);
     const { status } = req.body;
 
-    const booking = await db.bookings.getById(id);
+    const booking = db.bookings.getById(id);
     if (!booking) {
       return res.status(404).json({ error: 'Booking not found' });
     }
 
     // If approving, check availability again
     if (status === 'approved') {
-      if (!(await checkDateAvailability(booking.check_in, booking.check_out, id))) {
+      if (!checkDateAvailability(booking.check_in, booking.check_out, id)) {
         return res.status(400).json({ error: 'Dates are no longer available' });
       }
     }
 
-    await db.bookings.updateStatus(id, status);
+    db.bookings.updateStatus(id, status);
 
     // Send email to guest
     const statusMessage = status === 'approved'
@@ -224,10 +224,10 @@ app.patch('/api/bookings/:id', async (req, res) => {
 });
 
 // Delete booking
-app.delete('/api/bookings/:id', async (req, res) => {
+app.delete('/api/bookings/:id', (req, res) => {
   try {
     const id = parseInt(req.params.id);
-    await db.bookings.delete(id);
+    db.bookings.delete(id);
     res.json({ message: 'Booking deleted' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -235,9 +235,9 @@ app.delete('/api/bookings/:id', async (req, res) => {
 });
 
 // Get blocked dates
-app.get('/api/blocked-dates', async (req, res) => {
+app.get('/api/blocked-dates', (req, res) => {
   try {
-    const blockedDates = await db.blockedDates.getAll();
+    const blockedDates = db.blockedDates.getAll();
     res.json(blockedDates);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -245,10 +245,10 @@ app.get('/api/blocked-dates', async (req, res) => {
 });
 
 // Create blocked date
-app.post('/api/blocked-dates', async (req, res) => {
+app.post('/api/blocked-dates', (req, res) => {
   try {
     const { start_date, end_date, reason } = req.body;
-    const newBlockedDate = await db.blockedDates.create({ start_date, end_date, reason });
+    const newBlockedDate = db.blockedDates.create({ start_date, end_date, reason });
     res.json({ id: newBlockedDate.id, message: 'Dates blocked successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -256,10 +256,10 @@ app.post('/api/blocked-dates', async (req, res) => {
 });
 
 // Delete blocked date
-app.delete('/api/blocked-dates/:id', async (req, res) => {
+app.delete('/api/blocked-dates/:id', (req, res) => {
   try {
     const id = parseInt(req.params.id);
-    await db.blockedDates.delete(id);
+    db.blockedDates.delete(id);
     res.json({ message: 'Blocked date removed' });
   } catch (error) {
     res.status(500).json({ error: error.message });

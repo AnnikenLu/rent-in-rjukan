@@ -1,145 +1,153 @@
-const fs = require('fs');
-const path = require('path');
+const { neon } = require('@neondatabase/serverless');
 
-const dataDir = path.join(__dirname, 'data');
-const bookingsFile = path.join(dataDir, 'bookings.json');
-const blockedDatesFile = path.join(dataDir, 'blocked-dates.json');
-const settingsFile = path.join(dataDir, 'settings.json');
+// Initialize database connection
+const sql = neon(process.env.DATABASE_URL);
 
-// Initialize data directory and files
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir);
-}
-
-if (!fs.existsSync(bookingsFile)) {
-  fs.writeFileSync(bookingsFile, JSON.stringify([], null, 2));
-}
-
-if (!fs.existsSync(blockedDatesFile)) {
-  fs.writeFileSync(blockedDatesFile, JSON.stringify([], null, 2));
-}
-
-if (!fs.existsSync(settingsFile)) {
-  fs.writeFileSync(settingsFile, JSON.stringify({
-    admin_email: 'admin@rentinrjukan.com'
-  }, null, 2));
-}
-
-// Helper functions to read and write data
-function readJSON(file) {
+// Initialize database tables (runs on first load)
+async function initDatabase() {
   try {
-    const data = fs.readFileSync(file, 'utf8');
-    return JSON.parse(data);
+    // Create bookings table
+    await sql`
+      CREATE TABLE IF NOT EXISTS bookings (
+        id SERIAL PRIMARY KEY,
+        guest_name VARCHAR(255) NOT NULL,
+        guest_email VARCHAR(255) NOT NULL,
+        guest_phone VARCHAR(50),
+        check_in DATE NOT NULL,
+        check_out DATE NOT NULL,
+        guests INTEGER NOT NULL,
+        message TEXT,
+        status VARCHAR(50) DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Create blocked_dates table
+    await sql`
+      CREATE TABLE IF NOT EXISTS blocked_dates (
+        id SERIAL PRIMARY KEY,
+        start_date DATE NOT NULL,
+        end_date DATE NOT NULL,
+        reason VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Create settings table
+    await sql`
+      CREATE TABLE IF NOT EXISTS settings (
+        key VARCHAR(100) PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+
+    // Insert default admin email if not exists
+    await sql`
+      INSERT INTO settings (key, value)
+      VALUES ('admin_email', ${process.env.ADMIN_EMAIL || 'rentinrjukan@gmail.com'})
+      ON CONFLICT (key) DO NOTHING
+    `;
+
+    console.log('✅ Database initialized');
   } catch (error) {
-    console.error(`Error reading ${file}:`, error);
-    return [];
+    console.error('Error initializing database:', error);
   }
 }
 
-function writeJSON(file, data) {
-  try {
-    fs.writeFileSync(file, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error(`Error writing ${file}:`, error);
-  }
-}
+// Run initialization
+initDatabase();
 
 // Booking operations
 const bookingOps = {
-  getAll() {
-    return readJSON(bookingsFile);
+  async getAll() {
+    const result = await sql`SELECT * FROM bookings ORDER BY created_at DESC`;
+    return result;
   },
 
-  getById(id) {
-    const bookings = this.getAll();
-    return bookings.find(b => b.id === id);
+  async getById(id) {
+    const result = await sql`SELECT * FROM bookings WHERE id = ${id}`;
+    return result[0] || null;
   },
 
-  getPending() {
-    const bookings = this.getAll();
-    return bookings.filter(b => b.status === 'pending');
+  async getPending() {
+    const result = await sql`SELECT * FROM bookings WHERE status = 'pending' ORDER BY created_at DESC`;
+    return result;
   },
 
-  getApproved() {
-    const bookings = this.getAll();
-    return bookings.filter(b => b.status === 'approved');
+  async getApproved() {
+    const result = await sql`SELECT * FROM bookings WHERE status = 'approved' ORDER BY check_in ASC`;
+    return result;
   },
 
-  create(bookingData) {
-    const bookings = this.getAll();
-    const id = bookings.length > 0 ? Math.max(...bookings.map(b => b.id)) + 1 : 1;
+  async create(bookingData) {
+    const { guest_name, guest_email, guest_phone, check_in, check_out, guests, message } = bookingData;
 
-    const newBooking = {
-      id,
-      ...bookingData,
-      status: 'pending',
-      created_at: new Date().toISOString()
-    };
+    const result = await sql`
+      INSERT INTO bookings (guest_name, guest_email, guest_phone, check_in, check_out, guests, message, status)
+      VALUES (${guest_name}, ${guest_email}, ${guest_phone || null}, ${check_in}, ${check_out}, ${guests}, ${message || null}, 'pending')
+      RETURNING *
+    `;
 
-    bookings.push(newBooking);
-    writeJSON(bookingsFile, bookings);
-    return newBooking;
+    return result[0];
   },
 
-  updateStatus(id, status) {
-    const bookings = this.getAll();
-    const index = bookings.findIndex(b => b.id === id);
+  async updateStatus(id, status) {
+    const result = await sql`
+      UPDATE bookings
+      SET status = ${status}
+      WHERE id = ${id}
+      RETURNING *
+    `;
 
-    if (index === -1) return null;
-
-    bookings[index].status = status;
-    writeJSON(bookingsFile, bookings);
-    return bookings[index];
+    return result[0] || null;
   },
 
-  delete(id) {
-    const bookings = this.getAll();
-    const filtered = bookings.filter(b => b.id !== id);
-    writeJSON(bookingsFile, filtered);
+  async delete(id) {
+    await sql`DELETE FROM bookings WHERE id = ${id}`;
     return true;
   }
 };
 
 // Blocked dates operations
 const blockedDatesOps = {
-  getAll() {
-    return readJSON(blockedDatesFile);
+  async getAll() {
+    const result = await sql`SELECT * FROM blocked_dates ORDER BY start_date ASC`;
+    return result;
   },
 
-  create(dateData) {
-    const blockedDates = this.getAll();
-    const id = blockedDates.length > 0 ? Math.max(...blockedDates.map(b => b.id)) + 1 : 1;
+  async create(dateData) {
+    const { start_date, end_date, reason } = dateData;
 
-    const newBlockedDate = {
-      id,
-      ...dateData,
-      created_at: new Date().toISOString()
-    };
+    const result = await sql`
+      INSERT INTO blocked_dates (start_date, end_date, reason)
+      VALUES (${start_date}, ${end_date}, ${reason || null})
+      RETURNING *
+    `;
 
-    blockedDates.push(newBlockedDate);
-    writeJSON(blockedDatesFile, blockedDates);
-    return newBlockedDate;
+    return result[0];
   },
 
-  delete(id) {
-    const blockedDates = this.getAll();
-    const filtered = blockedDates.filter(b => b.id !== id);
-    writeJSON(blockedDatesFile, filtered);
+  async delete(id) {
+    await sql`DELETE FROM blocked_dates WHERE id = ${id}`;
     return true;
   }
 };
 
 // Settings operations
 const settingsOps = {
-  get(key) {
-    const settings = readJSON(settingsFile);
-    return settings[key];
+  async get(key) {
+    const result = await sql`SELECT value FROM settings WHERE key = ${key}`;
+    return result[0]?.value || null;
   },
 
-  set(key, value) {
-    const settings = readJSON(settingsFile);
-    settings[key] = value;
-    writeJSON(settingsFile, settings);
+  async set(key, value) {
+    await sql`
+      INSERT INTO settings (key, value)
+      VALUES (${key}, ${value})
+      ON CONFLICT (key)
+      DO UPDATE SET value = ${value}, updated_at = CURRENT_TIMESTAMP
+    `;
     return value;
   }
 };
